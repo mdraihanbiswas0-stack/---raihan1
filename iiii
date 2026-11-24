@@ -1,0 +1,117 @@
+name: Build Android APK from ZIP
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+    inputs:
+      zip_file:
+        description: "ZIP ফাইলের নাম (যেমন: app.zip অথবা খালি রাখলে প্রথম .zip ফাইল নেবে)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.ref }}-apk-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate and unzip uploaded ZIP archive
+        id: unzip_step
+        run: |
+          set -e
+          mkdir -p .unzipped_temp
+
+          ZIP_PATH="${{ github.event.inputs.zip_file }}"
+          if [ -z "$ZIP_PATH" ]; then
+            ZIP_PATH=$(find . -maxdepth 3 -name "*.zip" ! -path "./.git/*" | head -n 1)
+          fi
+
+          if [ -z "$ZIP_PATH" ] || [ ! -f "$ZIP_PATH" ]; then
+            echo "কোনো .zip ফাইল পাওয়া যায়নি! রিপোজিটরিতে .zip ফাইল আপলোড করুন।"
+            exit 1
+          fi
+
+          echo "Unzipping: $ZIP_PATH"
+          unzip -o "$ZIP_PATH" -d .unzipped_temp
+
+          # যদি জিপের ভেতরে একটিমাত্র রুট ফোল্ডার থাকে, তবে ভেতরের কনটেন্ট এক ধাপ ওপরে আনুন
+          COUNT=$(find .unzipped_temp -mindepth 1 -maxdepth 1 | wc -l)
+          FIRST_ITEM=$(find .unzipped_temp -mindepth 1 -maxdepth 1 | head -n 1)
+          if [ "$COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
+            mv "$FIRST_ITEM"/* .unzipped_temp/ 2>/dev/null || true
+            mv "$FIRST_ITEM"/.[!.]* .unzipped_temp/ 2>/dev/null || true
+            rmdir "$FIRST_ITEM" 2>/dev/null || true
+          fi
+
+      - name: Place extracted files and folders in proper locations
+        run: |
+          set -e
+          # আনজিপ হওয়া ফাইল/ফোল্ডারগুলো নির্ধারিত জায়গায় সাজানো:
+
+          # ১. যদি পুরো Android প্রজেক্ট (build.gradle, app/, gradle/) জিপের ভেতরে থাকে
+          if [ -f ".unzipped_temp/gradlew" ] || [ -d ".unzipped_temp/app" ]; then
+            cp -r .unzipped_temp/* .
+            [ -f ".unzipped_temp/gradlew" ] && chmod +x ./gradlew
+          fi
+
+          # ২. যদি ওয়েব/HTML/JS/CSS ফাইল থাকে (যেমন www, public, src, index.html)
+          if [ -f ".unzipped_temp/index.html" ]; then
+            mkdir -p www
+            cp -r .unzipped_temp/* www/
+          fi
+
+          # ৩. নির্দিষ্ট ফোল্ডার থাকলে সেগুলো সঠিক জায়গায় রাখা (প্রয়োজন অনুযায়ী বাড়াতে/কমাতে পারেন)
+          if [ -d ".unzipped_temp/assets" ]; then
+            mkdir -p app/src/main/assets
+            cp -r .unzipped_temp/assets/* app/src/main/assets/
+          fi
+
+          if [ -d ".unzipped_temp/res" ]; then
+            mkdir -p app/src/main/res
+            cp -r .unzipped_temp/res/* app/src/main/res/
+          fi
+
+          echo "ফাইলগুলো সফলভাবে নির্ধারিত স্থানে বসানো হয়েছে:"
+          ls -la
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Debug/Release APK
+        run: |
+          set -e
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug
+          else
+            echo "gradlew পাওয়া যায়নি। আপনার জিপ ফাইলে Android প্রজেক্ট বা Capacitor/Cordova সেটআপ যুক্ত করুন।"
+            exit 1
+          fi
+
+      - name: Upload built APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalcuFlow-APK-${{ env.VERSION_NAME }}
+          path: "**/*.apk"
+          if-no-files-found: error
